@@ -1,0 +1,42 @@
+# Build Output
+/Debug/
+/Release/
+
+*.o
+*.d
+*.elf
+*.map
+*.bin
+*.hex
+*.lst
+*.axf
+*.lnp
+*.dep
+
+# CubeIDE settings
+/.settings/
+*.launch
+.metadata/
+.project
+.cproject
+
+# STM32Cube generated code
+# (optional: ignore if we want generated code tracked)
+# /Drivers/
+# /Middlewares/
+
+# Auto-generated configuration files
+*.ioc.backup
+
+# Index/Temp Files
+*.tmp
+*.temp
+*~ 
+*.bak
+*.swp
+*.swo
+*.log
+
+# OS Files
+.DS_Store
+Thumbs.db
