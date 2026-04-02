@@ -95,7 +95,7 @@ static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN 0 */
 
 
-////////////////////////////////////////////////////////SOLENOID LGOCI/////////////////////////////////////
+////////////////////////////////////////////////////////SOLENOID LOGIC/////////////////////////////////////
 
 
 // GPIO PE15
@@ -103,6 +103,7 @@ void actuatePair1(void){ //notes D3, A3, E4, B4
 	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_15, GPIO_PIN_SET);
 	HAL_Delay(500);	//500 ms
 	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_15, GPIO_PIN_RESET);
+	HAL_Delay(500);	//500 ms
 }
 
 // GPIO PE14
@@ -110,6 +111,7 @@ void actuatePair2(void){ //notes Eb3, Bb3, F4, C5
 	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_14, GPIO_PIN_SET);
 	HAL_Delay(500);	//500 ms
 	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_14, GPIO_PIN_RESET);
+	HAL_Delay(500);	//500 ms
 }
 
 // GPIO PE12
@@ -117,6 +119,7 @@ void actuatePair3(void){ //notes E3, B3, F#4, C#5
 	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_12, GPIO_PIN_SET);
 	HAL_Delay(500);	//500 ms
 	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_12, GPIO_PIN_RESET);
+	HAL_Delay(500);	//500 ms
 }
 
 // GPIO PE10
@@ -124,6 +127,7 @@ void actuatePair4(void) { //notes F3, C4, G4, D5
 	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_10, GPIO_PIN_SET);
 	HAL_Delay(500);	//500 ms
 	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_10, GPIO_PIN_RESET);
+	HAL_Delay(500);	//500 ms
 }
 
 // initialize all solenoids to rest state
@@ -138,16 +142,16 @@ void Solenoid_Activate(uint8_t midi_note) {
     Solenoid_init(); //turn all off first
     switch(midi_note) {
         case 50: case 57: case 64: case 71: //solenoid 1
-            HAL_GPIO_WritePin(GPIOE, GPIO_PIN_15, GPIO_PIN_SET);
+            actuatePair1();
             break;
         case 51: case 58: case 65: case 72: //solenoid 2
-            HAL_GPIO_WritePin(GPIOE, GPIO_PIN_14, GPIO_PIN_SET);
+        	actuatePair2();
             break;
         case 52: case 59: case 66: case 73: //solenoid 3
-            HAL_GPIO_WritePin(GPIOE, GPIO_PIN_12, GPIO_PIN_SET);
+        	actuatePair3();
             break;
         case 53: case 60: case 67: case 74: //solenoid 4
-            HAL_GPIO_WritePin(GPIOE, GPIO_PIN_10, GPIO_PIN_SET);
+        	actuatePair4();
             break;
         default: //open string notes, no solenoid needed
             break;
