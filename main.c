@@ -76,8 +76,8 @@ TIM_HandleTypeDef htim3;
 DMA_HandleTypeDef hdma_tim1_ch1;
 
 /* USER CODE BEGIN PV */
-
-
+int encoder_initialized = 0;
+#define ENCODER_CPR 17500.0f // encoder counts per rotation (update)
 
 /* USER CODE END PV */
 
@@ -106,8 +106,6 @@ void Encoder_Init(void) {
     HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
     __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 65535);
     HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL); //changed to timer3
-    HAL_GPIO_WritePin(encoder_out_in1_GPIO_Port, encoder_out_in1_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(encoder_out_in2_GPIO_Port, encoder_out_in2_Pin, GPIO_PIN_RESET);
 }
 
 
@@ -181,24 +179,82 @@ void Solenoid_Activate(uint8_t midi_note) {
     }
 }
 
+
+void Encoder_Reset(uint8_t midi_note){ // current encoder string
+    	float target_angle = 0;
+
+        switch(midi_note) {
+            case 48: case 50: case 51: case 52: case 53: // C string
+                target_angle = 50.0f;
+                break;
+            case 55: case 57: case 58: case 59: case 60: // G string
+                target_angle = 100.0f;
+                break;
+            case 62: case 64: case 65: case 66: case 67: // D string
+                target_angle = 200.0f;
+                break;
+            case 69: case 71: case 72: case 73: case 74: // A string
+                target_angle = 300.0f;
+                break;
+            default:
+                return; // unknown note, do nothing
+        }
+
+		__HAL_TIM_SET_COUNTER(&htim3, (int32_t)((target_angle / 360.0f) * ENCODER_CPR)); // a string = cnt 400
+		encoder_initialized = 1;
+}
+
 void Encoder_Activate(uint8_t midi_note) {
-    Solenoid_init();
+    // Encoder parameters
+    const float ANGLE_TOLERANCE = 10.0f; // degrees tolerance
+
+    // Target angles in degrees for each string
+    float target_angle = 0;
+
     switch(midi_note) {
-        case 50: case 51: case 52: case 53:
-            HAL_GPIO_WritePin(GPIOE, GPIO_PIN_15, GPIO_PIN_SET);
+        case 48: case 50: case 51: case 52: case 53: // C string
+            target_angle = 50.0f;
             break;
-        case 54: case 55: case 56: case 57:
-            HAL_GPIO_WritePin(GPIOE, GPIO_PIN_14, GPIO_PIN_SET);
+        case 55: case 57: case 58: case 59: case 60: // G string
+            target_angle = 100.0f;
             break;
-        case 58: case 59: case 60: case 61:
-            HAL_GPIO_WritePin(GPIOE, GPIO_PIN_12, GPIO_PIN_SET);
+        case 62: case 64: case 65: case 66: case 67: // D string
+            target_angle = 200.0f;
             break;
-        case 62: case 63: case 64: case 65:
-            HAL_GPIO_WritePin(GPIOE, GPIO_PIN_10, GPIO_PIN_SET);
+        case 69: case 71: case 72: case 73: case 74: // A string
+            target_angle = 300.0f;
             break;
         default:
-            break;
+            return; // unknown note, do nothing
     }
+
+    // Convert target angle to encoder counts
+    int32_t target_count = (int32_t)((target_angle / 360.0f) * ENCODER_CPR);
+    int32_t tolerance_count = (int32_t)((ANGLE_TOLERANCE / 360.0f) * ENCODER_CPR);
+
+    // Move until within range
+    while (1) {
+        int32_t current_count = TIM3->CNT;
+
+        if (current_count >= target_count - tolerance_count &&
+            current_count <= target_count + tolerance_count) {
+            break; // within target range
+        }
+
+        if (current_count < target_count - tolerance_count) {
+            // Direction A (increase count)
+            HAL_GPIO_WritePin(encoder_out_in1_GPIO_Port, encoder_out_in1_Pin, GPIO_PIN_SET);
+            HAL_GPIO_WritePin(encoder_out_in2_GPIO_Port, encoder_out_in2_Pin, GPIO_PIN_RESET);
+        } else {
+            // Direction B (decrease count)
+            HAL_GPIO_WritePin(encoder_out_in1_GPIO_Port, encoder_out_in1_Pin, GPIO_PIN_RESET);
+            HAL_GPIO_WritePin(encoder_out_in2_GPIO_Port, encoder_out_in2_Pin, GPIO_PIN_SET);
+        }
+    }
+
+    // Stop motor (both low)
+    HAL_GPIO_WritePin(encoder_out_in1_GPIO_Port, encoder_out_in1_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(encoder_out_in2_GPIO_Port, encoder_out_in2_Pin, GPIO_PIN_RESET);
 }
 
 
@@ -663,12 +719,17 @@ int main(void)
     Encoder_Init();
 
     int counterValue = 0;
-    int pastCounterValue = 0;
     float angleValue = 0;
 
     // Start listening for MIDI
     HAL_UART_Receive_IT(&huart2, (uint8_t*)&midi_rx_byte, 1);
+//    // Direction A (increase count)
+    HAL_GPIO_WritePin(encoder_out_in1_GPIO_Port, encoder_out_in1_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(encoder_out_in2_GPIO_Port, encoder_out_in2_Pin, GPIO_PIN_RESET);
 
+//    // Direction B (decrease count)
+//    HAL_GPIO_WritePin(encoder_out_in1_GPIO_Port, encoder_out_in1_Pin, GPIO_PIN_RESET);
+//    HAL_GPIO_WritePin(encoder_out_in2_GPIO_Port, encoder_out_in2_Pin, GPIO_PIN_SET);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -677,25 +738,29 @@ int main(void)
   while (1)
 
   {
-	  counterValue = TIM4->CNT;
-	    if (counterValue != pastCounterValue) {
-	    	angleValue = (360.0f / 9829.0f) * ((float)counterValue);
-	    	printf("Current angle is: %f\n\r", angleValue);
-	    }
-	    pastCounterValue = counterValue;
+	  // prints current encoder value to arduino
+	  counterValue = TIM3->CNT;
+	  angleValue = (360.0/ENCODER_CPR)*((float)counterValue);
+	  printf("Current angle is: %f\n\r", angleValue);
 
       if (midi_new_event) {
           midi_new_event = 0;
 
-          int8_t idx = midi_led_index;
-          if (idx >= 0 && idx < 20) {
-              Note_On(idx);
-              SSD1306_ShowNote(note_names[idx]);
-              Solenoid_Activate(midi_note);      // activate the solenoids for the notes
-          } else {
-              Notes_Off();
-              SSD1306_ShowEmpty();
-              Solenoid_init();                   //  turn off solenoids
+          if(!encoder_initialized) { // first note tells keyboard what note encoder is on
+        	  Encoder_Reset(midi_note);
+          }
+          else {
+			  int8_t idx = midi_led_index;
+			  if (idx >= 0 && idx < 20) {
+				  Note_On(idx);
+				  SSD1306_ShowNote(note_names[idx]);
+				  Solenoid_Activate(midi_note);      // activate the solenoids for the notes
+//				  Encoder_Activate(midi_note);
+			  } else {
+				  Notes_Off();
+				  SSD1306_ShowEmpty();
+				  Solenoid_init();                   //  turn off solenoids
+			  }
           }
       }
 
