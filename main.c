@@ -40,7 +40,9 @@
 /* USER CODE BEGIN Includes */
 #include "solenoid.h"
 #include <math.h>
-#include "stdio.h"
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -73,12 +75,18 @@ SPI_HandleTypeDef hspi3;
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim4;
 DMA_HandleTypeDef hdma_tim1_ch1;
 
 /* USER CODE BEGIN PV */
 int encoder_initialized = 0;
 #define ENCODER_CPR 17500.0f // encoder counts per rotation (update)
 
+volatile int encoder_target_count = -1;  // -1 = no target active
+volatile uint8_t encoder_moving = 0;
+#define ENCODER_DEADBAND 60  // stop within +/-60 counts (approx 1.2deg at 17500 CPR)
+
+static uint8_t direction = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -89,10 +97,10 @@ static void MX_TIM1_Init(void);
 static void MX_SPI3_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_TIM4_Init(void);
 static void MX_LPUART1_UART_Init(void);
 static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
-
 
 
 /* USER CODE END PFP */
@@ -103,20 +111,135 @@ static void MX_TIM3_Init(void);
 ////////////////////////////////////////////////////////ENCODER CODE/////////////////////////////////////
 
 void Encoder_Init(void) {
+
     HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
-    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, 65535);
-    HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL); //changed to timer3
+    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, (1)*55535); //CALIBRATION: 55535 is a good value to make is spin slower
+
+    HAL_TIM_Encoder_Start_IT(&htim3, TIM_CHANNEL_ALL);
+
+    //stop the motor CHECK: BOTH SHOULD BE RESET BEFORE STARTING PROGRAM
+    HAL_GPIO_WritePin(encoder_out_in1_GPIO_Port, encoder_out_in1_Pin, GPIO_PIN_RESET); //CALIBRATION: setting this to set makes it turn clockwise
+    HAL_GPIO_WritePin(encoder_out_in2_GPIO_Port, encoder_out_in2_Pin, GPIO_PIN_RESET); //CALIBRATION: setting this to set makes it turn counterclockwise
 }
 
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim) {
 
-////////////////////////////////////////////////////////////////////////////////////////////////////////
+    if (htim->Instance == TIM3 && encoder_moving) {
+
+        int32_t current = TIM3->CNT;
+
+        int32_t error = encoder_target_count - current;
+
+        if (abs(error) <= ENCODER_DEADBAND) {
+
+            //stop motor
+            HAL_GPIO_WritePin(encoder_out_in1_GPIO_Port, encoder_out_in1_Pin, GPIO_PIN_RESET);
+            HAL_GPIO_WritePin(encoder_out_in2_GPIO_Port, encoder_out_in2_Pin, GPIO_PIN_RESET);
+
+            encoder_moving = 0;
+            encoder_target_count = -1;
+        }
+    }
+
+    if (htim->Instance == TIM16) {
+    	direction = !direction;
+    }
+}
+
+void Encoder_Reset(uint8_t midi_note1) {
+
+    float target_angle = 0;
+
+    switch(midi_note1) {
+		case 48: case 50: case 51: case 52: case 53: // C
+			target_angle = 150.0f;
+			break;
+		case 55: case 57: case 58: case 59: case 60: // G
+			target_angle = 124.0f;
+			break;
+		case 62: case 64: case 65: case 66: case 67: // D
+			target_angle = 106.5f;
+			break;
+		case 69: case 71: case 72: case 73: case 74: // A
+			target_angle = 94.0f;
+			break;
+        default:
+            return;
+    }
+
+    int32_t target_count = (int32_t)((target_angle / 360.0f) * ENCODER_CPR);
+
+    __HAL_TIM_SET_COUNTER(&htim3, target_count);
+
+    encoder_initialized = 1;
+}
+
+void Encoder_Activate(uint8_t midi_note1) {
+
+    float target_angle = 0;
+
+    switch(midi_note1) {
+		case 48: case 50: case 51: case 52: case 53: // C
+			target_angle = 150.0f;
+			break;
+		case 55: case 57: case 58: case 59: case 60: // G
+			target_angle = 124.0f;
+			break;
+		case 62: case 64: case 65: case 66: case 67: // D
+			target_angle = 106.5f;
+			break;
+		case 69: case 71: case 72: case 73: case 74: // A
+			target_angle = 94.0f;
+			break;
+        default:
+            return;
+    }
+
+    int32_t target_count = (int32_t)((target_angle / 360.0f) * ENCODER_CPR);
+
+    #if ENCODER_INVERT
+    target_count = -target_count;
+    #endif
+
+    int32_t current_count = TIM3->CNT;
+
+    #if ENCODER_INVERT
+    current_count = -current_count;
+    #endif
+
+    int32_t error = target_count - current_count;
+
+    // Already at position
+    if (abs(error) <= ENCODER_DEADBAND) {
+        encoder_moving = 0;
+        encoder_target_count = -1;
+
+        HAL_GPIO_WritePin(encoder_out_in1_GPIO_Port, encoder_out_in1_Pin, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(encoder_out_in2_GPIO_Port, encoder_out_in2_Pin, GPIO_PIN_RESET);
+        return;
+    }
+
+    encoder_target_count = target_count;
+    encoder_moving = 1;
+
+    // Direction based on error
+    if (error > 0) {
+        // Direction A
+        HAL_GPIO_WritePin(encoder_out_in1_GPIO_Port, encoder_out_in1_Pin, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(encoder_out_in2_GPIO_Port, encoder_out_in2_Pin, GPIO_PIN_SET);
+
+    } else {
+        // Direction B
+        HAL_GPIO_WritePin(encoder_out_in1_GPIO_Port, encoder_out_in1_Pin, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(encoder_out_in2_GPIO_Port, encoder_out_in2_Pin, GPIO_PIN_RESET);
+    }
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 
-////////////////////////////////////////////////////////SOLENOID LOGIC/////////////////////////////////////
 
-
-
-//currently we dont use the actuate pair functions, might change later.
+////////////////////////////////////////////////////////STEPPER / SOLENOID LOGIC/////////////////////////////////////
 
 // GPIO PE15
 void actuatePair1(void){ //notes D3, A3, E4, B4
@@ -159,8 +282,29 @@ void Solenoid_init(void) { // notes C3, G3, D4, A4 (open string, no solenoids ac
 }
 
 
+void stepper_init(void){
+	 HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
+	 __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 499);
+
+	 HAL_TIM_PWM_Start(&htim16, TIM_CHANNEL_1);
+	 __HAL_TIM_SET_COMPARE(&htim16, TIM_CHANNEL_1, 9);
+}
+
+
+/*void start_stepper(uint8_t * dir, uint8_t * lim){
+	HAL_GPIO_WritePin(GPIOD, GPIO_PIN_7, *dir);
+	*dir = !*dir;
+}*/
+
+void stop_stepper(void){
+	HAL_TIM_PWM_Stop(&htim4, TIM_CHANNEL_1);
+	HAL_TIM_PWM_Stop(&htim16, TIM_CHANNEL_1);
+}
+
 void Solenoid_Activate(uint8_t midi_note) {
     Solenoid_init();
+    //move bow
+    stepper_init();
     switch(midi_note) {
         case 50: case 57: case 64: case 71:
             HAL_GPIO_WritePin(GPIOE, GPIO_PIN_15, GPIO_PIN_SET);
@@ -177,90 +321,13 @@ void Solenoid_Activate(uint8_t midi_note) {
         default:
             break;
     }
+    //move bow
+    //start_stepper(dir, lim);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_7, direction);
 }
+ ///////////////////////////////////////////////////////////////////////////////////////////////////////
 
-
-void Encoder_Reset(uint8_t midi_note){ // current encoder string
-    	float target_angle = 0;
-
-        switch(midi_note) {
-            case 48: case 50: case 51: case 52: case 53: // C string
-                target_angle = 50.0f;
-                break;
-            case 55: case 57: case 58: case 59: case 60: // G string
-                target_angle = 100.0f;
-                break;
-            case 62: case 64: case 65: case 66: case 67: // D string
-                target_angle = 200.0f;
-                break;
-            case 69: case 71: case 72: case 73: case 74: // A string
-                target_angle = 300.0f;
-                break;
-            default:
-                return; // unknown note, do nothing
-        }
-
-		__HAL_TIM_SET_COUNTER(&htim3, (int32_t)((target_angle / 360.0f) * ENCODER_CPR)); // a string = cnt 400
-		encoder_initialized = 1;
-}
-
-void Encoder_Activate(uint8_t midi_note) {
-    // Encoder parameters
-    const float ANGLE_TOLERANCE = 10.0f; // degrees tolerance
-
-    // Target angles in degrees for each string
-    float target_angle = 0;
-
-    switch(midi_note) {
-        case 48: case 50: case 51: case 52: case 53: // C string
-            target_angle = 50.0f;
-            break;
-        case 55: case 57: case 58: case 59: case 60: // G string
-            target_angle = 100.0f;
-            break;
-        case 62: case 64: case 65: case 66: case 67: // D string
-            target_angle = 200.0f;
-            break;
-        case 69: case 71: case 72: case 73: case 74: // A string
-            target_angle = 300.0f;
-            break;
-        default:
-            return; // unknown note, do nothing
-    }
-
-    // Convert target angle to encoder counts
-    int32_t target_count = (int32_t)((target_angle / 360.0f) * ENCODER_CPR);
-    int32_t tolerance_count = (int32_t)((ANGLE_TOLERANCE / 360.0f) * ENCODER_CPR);
-
-    // Move until within range
-    while (1) {
-        int32_t current_count = TIM3->CNT;
-
-        if (current_count >= target_count - tolerance_count &&
-            current_count <= target_count + tolerance_count) {
-            break; // within target range
-        }
-
-        if (current_count < target_count - tolerance_count) {
-            // Direction A (increase count)
-            HAL_GPIO_WritePin(encoder_out_in1_GPIO_Port, encoder_out_in1_Pin, GPIO_PIN_SET);
-            HAL_GPIO_WritePin(encoder_out_in2_GPIO_Port, encoder_out_in2_Pin, GPIO_PIN_RESET);
-        } else {
-            // Direction B (decrease count)
-            HAL_GPIO_WritePin(encoder_out_in1_GPIO_Port, encoder_out_in1_Pin, GPIO_PIN_RESET);
-            HAL_GPIO_WritePin(encoder_out_in2_GPIO_Port, encoder_out_in2_Pin, GPIO_PIN_SET);
-        }
-    }
-
-    // Stop motor (both low)
-    HAL_GPIO_WritePin(encoder_out_in1_GPIO_Port, encoder_out_in1_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(encoder_out_in2_GPIO_Port, encoder_out_in2_Pin, GPIO_PIN_RESET);
-}
-
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-/////////////////LED CODE/////////////////////////////////////////////////////
+/////////////////LED CODE///////////////////////////////////////////////////////////////////////////////
 #define MAX_LED 20
 #define USE_BRIGHTNESS 1
 
@@ -352,7 +419,7 @@ void Notes_Off(void) {
 
     WS2812_Send();
 }
-//////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////
 
 //////////////////////////////////////////SPI DISPLAY CODE/////////////////////////////////////////
 
@@ -433,34 +500,34 @@ void SSD1306_Fill(uint8_t pattern) {
     }
 }
 
-//////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////
 
 ////////////////////////////////MIDI CODE////////////////////////////////////////////////////////////
 
 //MIDI note-to-LED mapping table
-//Index = LED index (0 = highest, 19 = lowest)
-//Value = MIDI note number
+//index = LED index (0 = highest, 19 = lowest)
+//value = MIDI note number
 const uint8_t midi_note_map[20] = {
-    74, 73, 72, 71, 69, 67, 66, 65, 64, 62,
-    60, 59, 58, 57, 55, 53, 52, 51, 50, 48
+    48, 50, 51, 52, 53, 55, 57, 58, 59, 60,
+    62, 64, 65, 66, 67, 69, 71, 72, 73, 74
 };
 
-//note name strings for display
+//note name strings for the display
 const char* note_names[20] = {
-    "D5", "C#5", "C5", "B4", "A4",
-    "G4", "F#4", "F4", "E4", "D4",
-    "C4", "B3", "Bb3", "A3", "G3",
-    "F3", "E3", "Eb3", "D3", "C3"
+    "C3", "D3", "Eb3", "E3", "F3",
+    "G3", "A3", "Bb3", "B3", "C4",
+    "D4", "E4", "F4", "F#4", "G4",
+    "A4", "B4", "C5", "C#5", "D5"
 };
 
 //MIDI state machine
 volatile uint8_t midi_rx_byte;
-volatile uint8_t midi_state = 0;    // 0 = waiting for status, 1 = got status, 2 = got note
+volatile uint8_t midi_state = 0; // 0 = waiting for status, 1 = got status, 2 = got note
 volatile uint8_t midi_status = 0;
 volatile uint8_t midi_note = 0;
 volatile uint8_t midi_velocity = 0;
-volatile int8_t  midi_led_index = -1;  // -1 = no note active
-volatile uint8_t midi_new_event = 0;   // flag for main loop
+volatile int8_t  midi_led_index = -1; // -1 = no note active
+volatile uint8_t midi_new_event = 0; // flag for main loop
 
 //convert MIDI note number to LED index, returns -1 if not mapped
 int8_t MIDI_NoteToLED(uint8_t note) {
@@ -685,51 +752,58 @@ int main(void)
   MX_SPI3_Init();
   MX_USART2_UART_Init();
   MX_TIM2_Init();
+  MX_TIM4_Init();
   MX_LPUART1_UART_Init();
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
 
-  Set_LED(0,  255, 0,   96);
-    Set_LED(1,  255, 0,   64);
-    Set_LED(2,  255, 0,   32);
-    Set_LED(3,  255, 64,  0);
-    Set_LED(4,  255, 128, 0);
-    Set_LED(5,  255, 191, 0);
-    Set_LED(6,  255, 255, 0);
-    Set_LED(7,  191, 255, 0);
-    Set_LED(8,  128, 255, 0);
-    Set_LED(9,  0,   255, 0);
-    Set_LED(10, 0,   255, 128);
-    Set_LED(11, 0,   255, 255);
-    Set_LED(12, 0,   191, 255);
-    Set_LED(13, 0,   128, 255);
-    Set_LED(14, 0,   64,  255);
-    Set_LED(15, 0,   0,   255);
-    Set_LED(16, 64,  0,   255);
-    Set_LED(17, 128, 0,   255);
-    Set_LED(18, 160, 0,   255);
-    Set_LED(19, 192, 0,   255);
-
+  //evenly spaced rainbow
+  Set_LED(0, 255, 0, 0);
+  Set_LED(1, 255, 20, 0);
+  Set_LED(2, 255, 40, 0);
+  Set_LED(3, 255, 64, 0);
+  Set_LED(4, 255, 128, 0);
+  Set_LED(5, 255, 191, 0);
+  Set_LED(6, 255, 255, 0);
+  Set_LED(7, 191, 255, 0);
+  Set_LED(8, 128, 255, 0);
+  Set_LED(9, 0, 255, 0);
+  Set_LED(10, 0, 255, 128);
+  Set_LED(11, 0, 255, 255);
+  Set_LED(12, 0, 191, 255);
+  Set_LED(13, 0, 128, 255);
+  Set_LED(14, 0, 64, 255);
+  Set_LED(15, 0, 0, 255);
+  Set_LED(16, 64, 0, 255);
+  Set_LED(17, 128, 0, 255);
+  Set_LED(18, 192, 0, 255);
+  Set_LED(19, 255, 0, 255);
     SSD1306_Init();
     SSD1306_Fill(0x00);
     Notes_Off();
 
     Solenoid_init();
-
+    //stepper_init();
+    //stop_stepper();
     Encoder_Init();
 
-    int counterValue = 0;
-    float angleValue = 0;
+	int counterValue = 0;
+	float angleValue = 0;
+
+    // quick test to verify everything works
+//        Note_On(0);
+//        SSD1306_ShowNote("D5");
+//        HAL_Delay(2000);
+//        Notes_Off();
+//        SSD1306_ShowEmpty();
 
     // Start listening for MIDI
     HAL_UART_Receive_IT(&huart2, (uint8_t*)&midi_rx_byte, 1);
-//    // Direction A (increase count)
-    HAL_GPIO_WritePin(encoder_out_in1_GPIO_Port, encoder_out_in1_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(encoder_out_in2_GPIO_Port, encoder_out_in2_Pin, GPIO_PIN_RESET);
+    //static uint8_t direction = 0;
 
-//    // Direction B (decrease count)
-//    HAL_GPIO_WritePin(encoder_out_in1_GPIO_Port, encoder_out_in1_Pin, GPIO_PIN_RESET);
-//    HAL_GPIO_WritePin(encoder_out_in2_GPIO_Port, encoder_out_in2_Pin, GPIO_PIN_SET);
+    //static uint8_t direction = 0;
+    //static uint8_t limit = 0; //corresponds to middle of the rail
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -738,32 +812,35 @@ int main(void)
   while (1)
 
   {
-	  // prints current encoder value to arduino
+	  // would print current encoder value to arduino
 	  counterValue = TIM3->CNT;
 	  angleValue = (360.0/ENCODER_CPR)*((float)counterValue);
 	  printf("Current angle is: %f\n\r", angleValue);
 
+
       if (midi_new_event) {
           midi_new_event = 0;
 
-          if(!encoder_initialized) { // first note tells keyboard what note encoder is on
+          if(!encoder_initialized) { //first note tells keyboard what note encoder is on
         	  Encoder_Reset(midi_note);
-          }
+		  }
           else {
 			  int8_t idx = midi_led_index;
 			  if (idx >= 0 && idx < 20) {
 				  Note_On(idx);
 				  SSD1306_ShowNote(note_names[idx]);
-				  Solenoid_Activate(midi_note);      // activate the solenoids for the notes
-//				  Encoder_Activate(midi_note);
+				  Solenoid_Activate(midi_note); //activate the solenoids for the note
+				  // stop_stepper();
+				  Encoder_Activate(midi_note);
+
 			  } else {
 				  Notes_Off();
 				  SSD1306_ShowEmpty();
-				  Solenoid_init();                   //  turn off solenoids
+				  stop_stepper();
+				  Solenoid_init(); //turn off solenoids
 			  }
           }
       }
-
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -1144,6 +1221,65 @@ static void MX_TIM3_Init(void)
 }
 
 /**
+  * @brief TIM4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM4_Init(void)
+{
+
+  /* USER CODE BEGIN TIM4_Init 0 */
+
+  /* USER CODE END TIM4_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM4_Init 1 */
+
+  /* USER CODE END TIM4_Init 1 */
+  htim4.Instance = TIM4;
+  htim4.Init.Prescaler = 71;
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim4.Init.Period = 999;
+  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM4_Init 2 */
+
+  /* USER CODE END TIM4_Init 2 */
+  HAL_TIM_MspPostInit(&htim4);
+
+}
+
+/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -1178,27 +1314,22 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
-  __HAL_RCC_GPIOG_CLK_ENABLE();
-  HAL_PWREx_EnableVddIO2();
   __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOF, OLED_DC_Pin|OLED_CS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(encoder_out_in1_GPIO_Port, encoder_out_in1_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, encoder_out_in1_Pin|encoder_out_in2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOE, GPIO_PIN_10|GPIO_PIN_12|GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(encoder_out_in2_GPIO_Port, encoder_out_in2_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(OLED_RES_GPIO_Port, OLED_RES_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOD, OLED_RES_Pin|GPIO_PIN_7, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : OLED_DC_Pin OLED_CS_Pin */
   GPIO_InitStruct.Pin = OLED_DC_Pin|OLED_CS_Pin;
@@ -1207,12 +1338,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : encoder_out_in1_Pin */
-  GPIO_InitStruct.Pin = encoder_out_in1_Pin;
+  /*Configure GPIO pins : encoder_out_in1_Pin encoder_out_in2_Pin */
+  GPIO_InitStruct.Pin = encoder_out_in1_Pin|encoder_out_in2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(encoder_out_in1_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PE10 PE12 PE14 PE15 */
   GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_12|GPIO_PIN_14|GPIO_PIN_15;
@@ -1221,19 +1352,30 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : encoder_out_in2_Pin */
-  GPIO_InitStruct.Pin = encoder_out_in2_Pin;
+  /*Configure GPIO pins : OLED_RES_Pin PD7 */
+  GPIO_InitStruct.Pin = OLED_RES_Pin|GPIO_PIN_7;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(encoder_out_in2_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : OLED_RES_Pin */
-  GPIO_InitStruct.Pin = OLED_RES_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  /*Configure GPIO pin : PD4 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PE0 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(OLED_RES_GPIO_Port, &GPIO_InitStruct);
+  GPIO_InitStruct.Alternate = GPIO_AF14_TIM16;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI4_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -1243,7 +1385,6 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-
 #ifdef __GNUC__
 #define PUTCHAR_PROTOTYPE int __io_putchar(int ch)
 #else
@@ -1254,6 +1395,8 @@ PUTCHAR_PROTOTYPE
   HAL_UART_Transmit(&hlpuart1, (uint8_t *)&ch, 1, 0xFFFF);
   return ch;
 }
+
+
 
 /* USER CODE END 4 */
 
